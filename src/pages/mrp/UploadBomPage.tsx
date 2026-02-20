@@ -337,7 +337,24 @@ export default function UploadBomPage() {
       findColIndex(newHeaders, ['Stage']),
     ].filter((i) => i >= 0);
 
+    const ignoredHeaderNames = ['s.no', 's no', 's.no.', 'serial no', 'serialno', 'sr no', 'sr. no'];
+    const ignoredColumnIndices = newHeaders
+      .map((h, idx) => ({ h: normalizeHeader(h), idx }))
+      .filter(({ h }) => ignoredHeaderNames.includes(h))
+      .map(({ idx }) => idx);
+    const ignoredSet = new Set<number>(ignoredColumnIndices);
+
     const createRowKey = (row: unknown[]) => keyColumnIndices.map((idx) => String(row[idx] ?? '')).join('|');
+
+    const normalizeCell = (v: unknown) => String(v ?? '').trim();
+    const rowsAreDifferent = (a: unknown[], b: unknown[]) => {
+      const len = Math.max(newHeaders.length, a.length, b.length);
+      for (let i = 0; i < len; i += 1) {
+        if (ignoredSet.has(i)) continue;
+        if (normalizeCell(a[i]) !== normalizeCell(b[i])) return true;
+      }
+      return false;
+    };
 
     const newRowsMap = new Map<string, unknown[]>();
     newRows.forEach((row) => {
@@ -356,7 +373,7 @@ export default function UploadBomPage() {
     newRows.forEach((row) => {
       const key = createRowKey(row);
       const oldRow = lastRowsMap.get(key);
-      if (oldRow && JSON.stringify(row) !== JSON.stringify(oldRow)) {
+      if (oldRow && rowsAreDifferent(row, oldRow)) {
         modifiedRows.push({ key, old: oldRow, new: row });
       }
     });
@@ -399,12 +416,12 @@ export default function UploadBomPage() {
     };
 
     const modifiedHtml = modifiedRows
-      .slice(0, 10)
       .map((m, idx) => {
         const changed = new Set<number>();
         const maxLen = Math.max(m.old.length, m.new.length, newHeaders.length);
         for (let i = 0; i < maxLen; i += 1) {
-          if ((m.old[i] ?? '') !== (m.new[i] ?? '')) changed.add(i);
+          if (ignoredSet.has(i)) continue;
+          if (normalizeCell(m.old[i]) !== normalizeCell(m.new[i])) changed.add(i);
         }
 
         const rowNum = String((m.old[0] ?? m.new[0] ?? idx + 1) as any);
@@ -463,16 +480,14 @@ export default function UploadBomPage() {
         ${removedRows.length > 0 ? `
           <div style="margin-top:12px">
             <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#dc2626">Removed Rows (${removedRows.length})</div>
-            ${renderTable(removedRows.slice(0, 20), 'removed')}
-            ${removedRows.length > 20 ? `<div style="margin-top:6px; color:#64748b; font-size:12px">... and ${removedRows.length - 20} more removed rows</div>` : ''}
+            ${renderTable(removedRows, 'removed')}
           </div>
         ` : ''}
 
         ${addedRows.length > 0 ? `
           <div style="margin-top:12px">
             <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#16a34a">Added Rows (${addedRows.length})</div>
-            ${renderTable(addedRows.slice(0, 20), 'added')}
-            ${addedRows.length > 20 ? `<div style="margin-top:6px; color:#64748b; font-size:12px">... and ${addedRows.length - 20} more added rows</div>` : ''}
+            ${renderTable(addedRows, 'added')}
           </div>
         ` : ''}
 
@@ -480,18 +495,24 @@ export default function UploadBomPage() {
           <div style="margin-top:12px">
             <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#7c3aed">Modified Rows (${modifiedRows.length})</div>
             <div style="margin-bottom:8px; color:#64748b; font-size:12px"><strong>Key Columns:</strong> ${escape(keyColumnNames.join(', '))}</div>
-            ${modifiedHtml}
-            ${modifiedRows.length > 10 ? `<div style=\"margin-top:6px; color:#64748b; font-size:12px\">... and ${modifiedRows.length - 10} more modified rows</div>` : ''}
+            <div style="max-height:55vh; overflow:auto; padding-right:6px">${modifiedHtml}</div>
           </div>
         ` : ''}
       </div>
     `;
 
     await Swal.fire({
-      title: 'Compare with Last Upload',
+      title: 'Data Comparison',
       html,
       width: '95%',
       confirmButtonText: 'Close',
+      showCancelButton: true,
+      cancelButtonText: 'Proceed to Upload',
+      customClass: { popup: 'swal-wide' },
+    }).then((result) => {
+      if (result.dismiss === Swal.DismissReason.cancel) {
+        void handleUpload();
+      }
     });
   };
 

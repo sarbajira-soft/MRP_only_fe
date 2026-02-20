@@ -332,16 +332,23 @@ export default function UploadIdpPage() {
       return;
     }
 
+    const escape = (value: unknown) => {
+      const str = value == null ? '' : String(value);
+      return str
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    };
+
     const newHeaders = (parsed.jsonData[0] ?? []) as unknown[];
     const lastHeaders = (last.jsonData[0] ?? []) as unknown[];
     const newRows = parsed.jsonData.slice(1) as unknown[][];
     const lastRows = last.jsonData.slice(1) as unknown[][];
 
-    const newCols = newHeaders.length;
-    const lastCols = lastHeaders.length;
-
     const rowDiff = newRows.length - lastRows.length;
-    const colDiff = newCols - lastCols;
+    const colDiff = newHeaders.length - lastHeaders.length;
 
     const findKeyIndex = (headers: unknown[]) => {
       const idx = headers.findIndex((h) => normalizeHeaderValue(h).includes('derived material'));
@@ -349,81 +356,207 @@ export default function UploadIdpPage() {
     };
 
     const keyIdx = findKeyIndex(newHeaders);
+    const keyColumnNames = ['Derived Material'];
     const toKey = (r: unknown[]) => String(r[keyIdx] ?? '').trim();
-    const normalizeRow = (r: unknown[]) => r.map((c) => String(c ?? '').trim());
 
-    const lastMap = new Map<string, string>();
-    lastRows.forEach((r) => {
-      const k = toKey(r);
+    const normalizeHeader = (h: unknown) => normalizeHeaderValue(h);
+    const ignoredHeaderNames = ['s.no', 's no', 's.no.', 'serial no', 'serialno', 'sr no', 'sr. no'];
+    const ignoredColumnIndices = newHeaders
+      .map((h, idx) => ({ h: normalizeHeader(h), idx }))
+      .filter(({ h }) => ignoredHeaderNames.includes(h))
+      .map(({ idx }) => idx);
+    const ignoredSet = new Set<number>(ignoredColumnIndices);
+
+    const normalizeCell = (v: unknown) => String(v ?? '').trim();
+    const rowsAreDifferent = (a: unknown[], b: unknown[]) => {
+      const len = Math.max(newHeaders.length, a.length, b.length);
+      for (let i = 0; i < len; i += 1) {
+        if (ignoredSet.has(i)) continue;
+        if (normalizeCell(a[i]) !== normalizeCell(b[i])) return true;
+      }
+      return false;
+    };
+
+    const newRowsMap = new Map<string, unknown[]>();
+    newRows.forEach((row) => {
+      const k = toKey(row);
       if (!k) return;
-      lastMap.set(k, JSON.stringify(normalizeRow(r)));
+      newRowsMap.set(k, row);
     });
-    const newMap = new Map<string, string>();
-    newRows.forEach((r) => {
-      const k = toKey(r);
+
+    const lastRowsMap = new Map<string, unknown[]>();
+    lastRows.forEach((row) => {
+      const k = toKey(row);
       if (!k) return;
-      newMap.set(k, JSON.stringify(normalizeRow(r)));
+      lastRowsMap.set(k, row);
     });
 
-    const added: string[] = [];
-    const removed: string[] = [];
-    const modified: string[] = [];
+    const addedRows = newRows.filter((row) => {
+      const k = toKey(row);
+      return k && !lastRowsMap.has(k);
+    });
 
-    newMap.forEach((v, k) => {
-      if (!lastMap.has(k)) {
-        added.push(k);
-      } else if (lastMap.get(k) !== v) {
-        modified.push(k);
+    const removedRows = lastRows.filter((row) => {
+      const k = toKey(row);
+      return k && !newRowsMap.has(k);
+    });
+
+    const modifiedRows: { key: string; old: unknown[]; new: unknown[] }[] = [];
+    newRows.forEach((row) => {
+      const k = toKey(row);
+      if (!k) return;
+      const oldRow = lastRowsMap.get(k);
+      if (oldRow && rowsAreDifferent(row, oldRow)) {
+        modifiedRows.push({ key: k, old: oldRow, new: row });
       }
     });
-    lastMap.forEach((_, k) => {
-      if (!newMap.has(k)) removed.push(k);
-    });
 
-    const sample = (arr: string[]) => arr.slice(0, 10).join(', ');
+    const newFileName = (selectedFile?.name ?? '').trim();
+    const oldFileName = String((last as any)?.record?.s3_upload_path ?? '').split('/').pop();
+    const headerCells = newHeaders
+      .map(
+        (h) =>
+          `<th style="position:sticky; top:0; background:#0f172a; color:#fff; padding:8px; border-bottom:1px solid #334155; white-space:nowrap !important; word-break:keep-all !important; min-width:120px">${escape(
+            h,
+          )}</th>`,
+      )
+      .join('');
+
+    const renderRowCells = (row: unknown[], changed: Set<number> | null, mode: 'old' | 'new') =>
+      newHeaders
+        .map((_, idx) => {
+          const isChanged = changed ? changed.has(idx) : false;
+          const bg = !changed
+            ? ''
+            : !isChanged
+              ? 'background:#ffffff;'
+              : mode === 'old'
+                ? 'background:#fee2e2;'
+                : 'background:#dcfce7;';
+          return `<td style="padding:8px; border-bottom:1px solid #e2e8f0; white-space:nowrap !important; word-break:keep-all !important; min-width:120px; ${bg}">${escape(row[idx] ?? '')}</td>`;
+        })
+        .join('');
+
+    const renderTable = (rows: unknown[][], rowClass: string) => {
+      const body = rows
+        .map(
+          (row) => `
+            <tr class="${rowClass}">${renderRowCells(row, null, 'new')}</tr>
+          `,
+        )
+        .join('');
+      return `
+        <div style="overflow:auto; max-height:45vh; border:1px solid #e2e8f0; border-radius:10px">
+          <table style="border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; table-layout:auto">
+            <thead><tr>${headerCells}</tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+    };
+
+    const modifiedHtml = modifiedRows
+      .map((m, idx) => {
+        const changed = new Set<number>();
+        const maxLen = Math.max(m.old.length, m.new.length, newHeaders.length);
+        for (let i = 0; i < maxLen; i += 1) {
+          if (ignoredSet.has(i)) continue;
+          if (normalizeCell(m.old[i]) !== normalizeCell(m.new[i])) changed.add(i);
+        }
+
+        const rowNum = String((m.old[0] ?? m.new[0] ?? idx + 1) as any);
+        return `
+          <div style="margin-top:12px">
+            <div style="font-size:13px; font-weight:600; margin-bottom:6px">
+              Row ${escape(rowNum)} - ${changed.size} column(s) changed
+            </div>
+            <div style="overflow:auto; border:1px solid #e2e8f0; border-radius:10px">
+              <table style="border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; table-layout:auto">
+                <thead><tr>${headerCells}</tr></thead>
+                <tbody>
+                  <tr>${renderRowCells(m.old, changed, 'old')}</tr>
+                  <tr>${renderRowCells(m.new, changed, 'new')}</tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
 
     const html = `
       <div style="text-align:left">
-        <div style="font-size:14px; font-weight:600; margin-bottom:8px">Comparison Summary</div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px">
-          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px">
-            <div style="color:#64748b; font-size:12px">Previous</div>
-            <div style="font-size:13px"><strong>Sheet:</strong> ${last.sheetName}</div>
-            <div style="font-size:13px"><strong>Rows:</strong> ${lastRows.length}</div>
-            <div style="font-size:13px"><strong>Columns:</strong> ${lastCols}</div>
+        <div style="font-size:14px; font-weight:700; margin-bottom:8px">Data Comparison</div>
+        <div style="margin-bottom:10px; color:#0f172a; font-size:13px">
+          Comparing: <strong>${escape(oldFileName || 'Previous')}</strong> → <strong>${escape(
+            newFileName || parsed.sheetName || 'Selected',
+          )}</strong>
+        </div>
+
+        <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px">
+          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px; min-width:240px">
+            <div style="color:#64748b; font-size:12px">Rows</div>
+            <div style="font-size:13px"><strong>${lastRows.length}</strong> → <strong>${newRows.length}</strong> <span style="color:${rowDiff >= 0 ? '#16a34a' : '#dc2626'}">(${rowDiff >= 0 ? '+' : ''}${rowDiff})</span></div>
           </div>
-          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px">
-            <div style="color:#64748b; font-size:12px">Selected</div>
-            <div style="font-size:13px"><strong>Sheet:</strong> ${parsed.sheetName}</div>
-            <div style="font-size:13px"><strong>Rows:</strong> ${newRows.length} <span style="color:${rowDiff >= 0 ? '#16a34a' : '#dc2626'}">(${rowDiff >= 0 ? '+' : ''}${rowDiff})</span></div>
-            <div style="font-size:13px"><strong>Columns:</strong> ${newCols} <span style="color:${colDiff >= 0 ? '#16a34a' : '#dc2626'}">(${colDiff >= 0 ? '+' : ''}${colDiff})</span></div>
+          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px; min-width:240px">
+            <div style="color:#64748b; font-size:12px">Columns</div>
+            <div style="font-size:13px"><strong>${lastHeaders.length}</strong> → <strong>${newHeaders.length}</strong> <span style="color:${colDiff >= 0 ? '#16a34a' : '#dc2626'}">(${colDiff >= 0 ? '+' : ''}${colDiff})</span></div>
+          </div>
+          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px; min-width:240px">
+            <div style="color:#64748b; font-size:12px">Changes</div>
+            <div style="font-size:13px">
+              <span style="color:#16a34a; font-weight:600">+${addedRows.length} added</span>
+              <span style="margin-left:10px; color:#dc2626; font-weight:600">-${removedRows.length} removed</span>
+              <span style="margin-left:10px; color:#7c3aed; font-weight:600">~${modifiedRows.length} modified</span>
+            </div>
           </div>
         </div>
-        <div style="margin-top:12px; display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px">
-          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px">
-            <div style="color:#64748b; font-size:12px">Added keys</div>
-            <div style="font-size:16px; font-weight:700; margin-top:4px">${added.length}</div>
-            ${added.length ? `<div style="margin-top:6px; font-size:12px; color:#334155"><strong>Sample:</strong> ${sample(added)}</div>` : ''}
+
+        ${addedRows.length === 0 && removedRows.length === 0 && modifiedRows.length === 0 ? `
+          <div style="border:1px solid #e2e8f0; border-radius:12px; padding:14px; text-align:center; background:#f8fafc">
+            <div style="font-size:14px; font-weight:700; color:#16a34a">No differences found</div>
+            <div style="margin-top:6px; color:#64748b; font-size:12px">The files appear to be identical.</div>
           </div>
-          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px">
-            <div style="color:#64748b; font-size:12px">Removed keys</div>
-            <div style="font-size:16px; font-weight:700; margin-top:4px">${removed.length}</div>
-            ${removed.length ? `<div style="margin-top:6px; font-size:12px; color:#334155"><strong>Sample:</strong> ${sample(removed)}</div>` : ''}
+        ` : ''}
+
+        ${removedRows.length > 0 ? `
+          <div style="margin-top:12px">
+            <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#dc2626">Removed Rows (${removedRows.length})</div>
+            ${renderTable(removedRows, 'removed')}
           </div>
-          <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px">
-            <div style="color:#64748b; font-size:12px">Modified keys</div>
-            <div style="font-size:16px; font-weight:700; margin-top:4px">${modified.length}</div>
-            ${modified.length ? `<div style="margin-top:6px; font-size:12px; color:#334155"><strong>Sample:</strong> ${sample(modified)}</div>` : ''}
+        ` : ''}
+
+        ${addedRows.length > 0 ? `
+          <div style="margin-top:12px">
+            <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#16a34a">Added Rows (${addedRows.length})</div>
+            ${renderTable(addedRows, 'added')}
           </div>
-        </div>
+        ` : ''}
+
+        ${modifiedRows.length > 0 ? `
+          <div style="margin-top:12px">
+            <div style="font-size:13px; font-weight:700; margin-bottom:6px; color:#7c3aed">Modified Rows (${modifiedRows.length})</div>
+            <div style="margin-bottom:8px; color:#64748b; font-size:12px"><strong>Key Columns:</strong> ${escape(
+              keyColumnNames.join(', '),
+            )}</div>
+            <div style="max-height:55vh; overflow:auto; padding-right:6px">${modifiedHtml}</div>
+          </div>
+        ` : ''}
       </div>
     `;
 
     await Swal.fire({
-      title: 'Compare with Last Upload',
+      title: 'Data Comparison',
       html,
-      width: '70%',
+      width: '95%',
       confirmButtonText: 'Close',
+      showCancelButton: true,
+      cancelButtonText: 'Proceed to Upload',
+      customClass: { popup: 'swal-wide' },
+    }).then((result) => {
+      if (result.dismiss === Swal.DismissReason.cancel) {
+        void handleUpload();
+      }
     });
   };
 
