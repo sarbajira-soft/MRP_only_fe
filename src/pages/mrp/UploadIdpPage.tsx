@@ -101,6 +101,34 @@ async function parseExcel(file: File): Promise<ParsedExcel> {
   return { sheetName: bestSheetName, jsonData: bestJsonData ?? ([] as unknown[][]) };
 }
 
+async function parseExcelArrayBuffer(buffer: ArrayBuffer): Promise<ParsedExcel> {
+  const workbook = XLSX.read(buffer, { type: 'array' });
+
+  let bestSheetName = workbook.SheetNames[0] ?? 'Sheet1';
+  let bestScore = -1;
+  let bestJsonData: unknown[][] | null = null;
+
+  workbook.SheetNames.forEach((sn) => {
+    const ws = workbook.Sheets[sn];
+    if (!ws) return;
+    const aoa =
+      (XLSX.utils.sheet_to_json(ws, {
+        header: 1,
+        defval: '',
+        blankrows: false,
+      }) as unknown[][]) ?? [];
+
+    const score = scoreIdpSheet(sn, aoa);
+    if (score > bestScore) {
+      bestScore = score;
+      bestSheetName = sn;
+      bestJsonData = aoa;
+    }
+  });
+
+  return { sheetName: bestSheetName, jsonData: bestJsonData ?? ([] as unknown[][]) };
+}
+
 function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -326,10 +354,26 @@ export default function UploadIdpPage() {
       return;
     }
 
-    const last = safeLoadLastParsed();
+    let last = safeLoadLastParsed() as (ParsedExcel & { record?: unknown }) | null;
     if (!last) {
-      await Swal.fire({ icon: 'info', title: 'No Previous Upload', text: 'No previous IDP upload found to compare' });
-      return;
+      const latestBackend = uploads.find((u) => u.status === 'active' && !!u.backendFileId);
+      if (latestBackend?.backendFileId) {
+        try {
+          const buf = await filesApi.downloadArrayBuffer(latestBackend.backendFileId, 'idp');
+          const parsedLast = await parseExcelArrayBuffer(buf);
+          last = parsedLast as ParsedExcel & { record?: unknown };
+          (last as any).record = {
+            original_name: latestBackend.fileName,
+            id: latestBackend.backendFileId,
+          };
+        } catch {
+          await Swal.fire({ icon: 'info', title: 'No Previous Upload', text: 'No previous IDP upload found to compare' });
+          return;
+        }
+      } else {
+        await Swal.fire({ icon: 'info', title: 'No Previous Upload', text: 'No previous IDP upload found to compare' });
+        return;
+      }
     }
 
     const escape = (value: unknown) => {
@@ -412,7 +456,9 @@ export default function UploadIdpPage() {
     });
 
     const newFileName = (selectedFile?.name ?? '').trim();
-    const oldFileName = String((last as any)?.record?.s3_upload_path ?? '').split('/').pop();
+    const oldFileName =
+      String((last as any)?.record?.original_name ?? '') ||
+      String((last as any)?.record?.s3_upload_path ?? '').split('/').pop();
     const headerCells = newHeaders
       .map(
         (h) =>
@@ -666,7 +712,7 @@ export default function UploadIdpPage() {
           </div>
 
           <div>
-            <div className="rounded-xl border border-slate-200 bg-indigo-50/40 p-4">
+            <div className="mt-6 rounded-xl border border-slate-200 bg-indigo-50/40 p-4 lg:mt-7">
               <div className="text-xs text-slate-500">Accepted: .xlsx, .xls, .xlsm | Max size: 10MB</div>
             </div>
           </div>
